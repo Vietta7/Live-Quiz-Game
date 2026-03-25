@@ -10,6 +10,8 @@ function handleMessage(ws, socketId, msg) {
     case 'reg':         return handleReg(ws, socketId, data);
     case 'create_game': return handleCreateGame(ws, socketId, data);
     case 'join_game':   return handleJoinGame(ws, socketId, data);
+    case 'start_game': return handleStartGame(ws, socketId, data);
+    case 'answer':     return handleAnswer(ws, socketId, data);
     default: break;
   }
 }
@@ -123,7 +125,65 @@ function handleJoinGame(ws, socketId, data) {
   broadcast(allWs, 'update_players', game.players.map(p => ({ name: p.name, index: p.index, score: p.score })));
 }
 
-function handleDisconnect(socketId) {
+function sendQuestion(game, questionIndex) {
+  const q = game.questions[questionIndex];
+  game.currentQuestion = questionIndex;
+  game.answers[questionIndex] = new Map();
+
+  const allWs = getGameSockets(game);
+  broadcast(allWs, 'question', {
+    questionNumber: questionIndex + 1,
+    totalQuestions: game.questions.length,
+    text: q.text,
+    options: q.options,
+    timeLimitSec: q.timeLimitSec,
+  });
+
+  const timer = setTimeout(() => {
+    resolveQuestion(game, questionIndex);
+  }, q.timeLimitSec * 1000);
+
+  game.timers[questionIndex] = { timer, startedAt: Date.now(), timeLimitSec: q.timeLimitSec };
 }
 
-module.exports = { handleMessage, handleDisconnect, socketToPlayer, getGameSockets, validateQuestions };
+function handleStartGame(ws, socketId, data) {
+  const playerIndex = socketToPlayer.get(socketId);
+  if (!playerIndex) return send(ws, 'error', { errorText: 'Not registered' });
+
+  const { gameId } = data;
+  const game = games.get(gameId);
+  if (!game) return send(ws, 'error', { errorText: 'Game not found' });
+  if (game.hostId !== playerIndex) return send(ws, 'error', { errorText: 'Only host can start' });
+  if (game.status !== 'waiting') return send(ws, 'error', { errorText: 'Game already started' });
+
+  game.status = 'in_progress';
+  sendQuestion(game, 0);
+}
+
+function handleAnswer(ws, socketId, data) {
+  const playerIndex = socketToPlayer.get(socketId);
+  if (!playerIndex) return;
+
+  const { gameId, questionIndex, answerIndex } = data;
+  const game = games.get(gameId);
+  if (!game || game.status !== 'in_progress') return;
+  if (game.currentQuestion !== questionIndex) return;
+  if (game.pausedAt !== null) return;
+
+  const answersMap = game.answers[questionIndex];
+  if (answersMap.has(playerIndex)) return;
+
+  answersMap.set(playerIndex, { answerIndex, time: Date.now() });
+  send(ws, 'answer_accepted', { questionIndex });
+
+  const activePlayers = game.players.filter(p => p.index !== game.hostId);
+  if (answersMap.size >= activePlayers.length) {
+    const timerObj = game.timers[questionIndex];
+    if (timerObj && timerObj.timer) {
+      clearTimeout(timerObj.timer);
+      timerObj.timer = null;
+    }
+    resolveQuestion(game, questionIndex);
+  }
+}
+module.exports = { handleMessage, handleDisconnect, socketToPlayer, getGameSockets, validateQuestions, sendQuestion};
