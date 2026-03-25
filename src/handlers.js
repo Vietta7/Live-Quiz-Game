@@ -186,4 +186,57 @@ function handleAnswer(ws, socketId, data) {
     resolveQuestion(game, questionIndex);
   }
 }
-module.exports = { handleMessage, handleDisconnect, socketToPlayer, getGameSockets, validateQuestions, sendQuestion};
+
+const BASE_POINTS = 1000;
+
+function resolveQuestion(game, questionIndex) {
+  if (game._resolving === questionIndex) return;
+  game._resolving = questionIndex;
+
+  const q = game.questions[questionIndex];
+  const answersMap = game.answers[questionIndex] || new Map();
+  const timerObj = game.timers[questionIndex];
+  const questionStartedAt = timerObj ? timerObj.startedAt : Date.now();
+
+  const playerResults = [];
+
+  for (const p of game.players) {
+    const ans = answersMap.get(p.index);
+    let answered = false, correct = false, pointsEarned = 0;
+
+    if (ans !== undefined) {
+      answered = true;
+      if (ans.answerIndex === q.correctIndex) {
+        correct = true;
+        const elapsed = (ans.time - questionStartedAt) / 1000;
+        const timeRemaining = Math.max(0, q.timeLimitSec - elapsed);
+        pointsEarned = Math.round(BASE_POINTS * (timeRemaining / q.timeLimitSec));
+      }
+    }
+
+    p.score += pointsEarned;
+    playerResults.push({ name: p.name, answered, correct, pointsEarned, totalScore: p.score });
+  }
+
+  const allWs = getGameSockets(game);
+  broadcast(allWs, 'question_result', {
+    questionIndex,
+    correctIndex: q.correctIndex,
+    playerResults,
+  });
+
+  const nextIndex = questionIndex + 1;
+  if (nextIndex < game.questions.length) {
+    setTimeout(() => sendQuestion(game, nextIndex), 2000);
+  } else {
+    game.status = 'finished';
+    const sorted = [...game.players].sort((a, b) => b.score - a.score);
+    let rank = 1;
+    const scoreboard = sorted.map((p, i) => {
+      if (i > 0 && sorted[i - 1].score !== p.score) rank = i + 1;
+      return { name: p.name, score: p.score, rank };
+    });
+    setTimeout(() => broadcast(allWs, 'game_finished', { scoreboard }), 2000);
+  }
+}
+module.exports = { handleMessage, handleDisconnect, socketToPlayer, getGameSockets, validateQuestions, sendQuestion, resolveQuestion};
